@@ -1,12 +1,19 @@
 services:
+
   generate:
     build: .
     command: python generate.py
     environment:
       # Set whichever key(s) you have – provider is auto-detected
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Priority: deepseek → qwen → groq → gemini → mistral → together → openrouter → openai
+      DEEPSEEK_API_KEY:    ${DEEPSEEK_API_KEY:-}
+      DASHSCOPE_API_KEY:   ${DASHSCOPE_API_KEY:-}
+      GROQ_API_KEY:        ${GROQ_API_KEY:-}
+      GEMINI_API_KEY:      ${GEMINI_API_KEY:-}
+      MISTRAL_API_KEY:     ${MISTRAL_API_KEY:-}
+      TOGETHER_API_KEY:    ${TOGETHER_API_KEY:-}
+      OPENROUTER_API_KEY:  ${OPENROUTER_API_KEY:-}
+      OPENAI_API_KEY:      ${OPENAI_API_KEY:-}
     volumes:
       - ./data:/app/data
 
@@ -14,9 +21,24 @@ services:
     build: .
     command: python analyze.py
     environment:
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DEEPSEEK_API_KEY:    ${DEEPSEEK_API_KEY:-}
+      DASHSCOPE_API_KEY:   ${DASHSCOPE_API_KEY:-}
+      GROQ_API_KEY:        ${GROQ_API_KEY:-}
+      GEMINI_API_KEY:      ${GEMINI_API_KEY:-}
+      MISTRAL_API_KEY:     ${MISTRAL_API_KEY:-}
+      TOGETHER_API_KEY:    ${TOGETHER_API_KEY:-}
+      OPENROUTER_API_KEY:  ${OPENROUTER_API_KEY:-}
+      OPENAI_API_KEY:      ${OPENAI_API_KEY:-}
     volumes:
       - ./data:/app/data
       - ./results:/app/results
+    depends_on:
+      - generate
+
+  report:
+    build: .
+    command: python report.py
+    volumes:
+      - ./results:/app/results
+    depends_on:
+      - analyze
