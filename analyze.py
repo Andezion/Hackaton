@@ -13,16 +13,25 @@ Output per dialog:
   - agent_mistakes   : list[ ignored_question | incorrect_info | rude_tone |
                              no_resolution | unnecessary_escalation ]
   - reasoning        : short free-text justification (for transparency)
+  - elapsed_ms       : LLM call duration in milliseconds
+  - analyzed_at      : ISO-8601 UTC timestamp
+
+Extra summary fields:
+  - hidden_dissatisfaction_accuracy: how often the LLM correctly flagged
+    hidden dissatisfaction dialogs as "unsatisfied"
+  - scenario_breakdown: avg quality_score and satisfaction distribution per scenario
 
 Usage:
     python analyze.py [--input data/chats.json] [--out results/analysis.json]
-                      [--provider deepseek|qwen|openai] [--model MODEL] [--seed 42]
+                      [--provider PROVIDER] [--model MODEL] [--seed 42]
+                      [--filter all|hidden_only|<scenario>]
 """
 
 import argparse
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -188,7 +197,9 @@ def analyze_dialog(
 
     for attempt in range(3):
         try:
+            t0 = time.monotonic()
             response = client.chat.completions.create(**call_kwargs)
+            elapsed_ms = round((time.monotonic() - t0) * 1000)
             raw_text = response.choices[0].message.content.strip()
 
             # Strip markdown fences that some models add despite instructions
@@ -198,7 +209,10 @@ def analyze_dialog(
                     raw_text = raw_text[4:]
 
             raw_data = json.loads(raw_text)
-            return validate_and_clean(raw_data)
+            result = validate_and_clean(raw_data)
+            result["elapsed_ms"] = elapsed_ms
+            result["analyzed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            return result
 
         except (json.JSONDecodeError, KeyError) as exc:
             print(
@@ -207,14 +221,17 @@ def analyze_dialog(
             )
             time.sleep(2 ** attempt)
 
-    # Fallback if all attempts fail
-    print(f"  [error] dialog {dialog['id']}: returning default metrics.", file=sys.stderr)
+    print(
+        f"  [error] dialog {dialog['id']}: returning default metrics.", file=sys.stderr
+    )
     return {
         "intent": "other",
         "satisfaction": "neutral",
         "quality_score": 3,
         "agent_mistakes": [],
         "reasoning": "Analysis failed after 3 attempts.",
+        "elapsed_ms": 0,
+        "analyzed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
 
@@ -231,6 +248,14 @@ def compute_summary(results: list[dict]) -> dict:
     satisfaction_dist: dict[str, int] = {}
     mistake_dist: dict[str, int] = {}
     total_score = 0
+    total_elapsed = 0
+
+    # Per-scenario accumulators: {scenario: {score_sum, count, satisfaction counts}}
+    scenario_acc: dict[str, dict] = {}
+
+    # Hidden dissatisfaction accuracy
+    hidden_total = 0
+    hidden_detected = 0  # labeled unsatisfied when ground-truth hidden=True
 
     for r in results:
         intent_dist[r["intent"]] = intent_dist.get(r["intent"], 0) + 1
@@ -238,17 +263,59 @@ def compute_summary(results: list[dict]) -> dict:
             satisfaction_dist.get(r["satisfaction"], 0) + 1
         )
         total_score += r["quality_score"]
+        total_elapsed += r.get("elapsed_ms", 0)
         for m in r["agent_mistakes"]:
             mistake_dist[m] = mistake_dist.get(m, 0) + 1
+
+        # Scenario breakdown
+        sc = r.get("scenario") or "unknown"
+        if sc not in scenario_acc:
+            scenario_acc[sc] = {"score_sum": 0, "count": 0, "satisfaction": {}}
+        scenario_acc[sc]["score_sum"] += r["quality_score"]
+        scenario_acc[sc]["count"] += 1
+        sat = r["satisfaction"]
+        scenario_acc[sc]["satisfaction"][sat] = (
+            scenario_acc[sc]["satisfaction"].get(sat, 0) + 1
+        )
+
+        # Hidden dissatisfaction accuracy
+        if r.get("hidden_dissatisfaction") is True:
+            hidden_total += 1
+            if r["satisfaction"] == "unsatisfied":
+                hidden_detected += 1
+
+    scenario_breakdown = {
+        sc: {
+            "avg_quality_score": round(acc["score_sum"] / acc["count"], 2),
+            "count": acc["count"],
+            "satisfaction": acc["satisfaction"],
+        }
+        for sc, acc in sorted(scenario_acc.items())
+    }
+
+    hidden_accuracy: float | None = None
+    if hidden_total > 0:
+        hidden_accuracy = round(hidden_detected / hidden_total, 2)
 
     return {
         "total_dialogs": total,
         "avg_quality_score": round(total_score / total, 2),
+        "avg_elapsed_ms": round(total_elapsed / total),
         "intent_distribution": intent_dist,
         "satisfaction_distribution": satisfaction_dist,
         "mistake_frequency": dict(
             sorted(mistake_dist.items(), key=lambda x: x[1], reverse=True)
         ),
+        "hidden_dissatisfaction_accuracy": {
+            "total_hidden_dialogs": hidden_total,
+            "detected_as_unsatisfied": hidden_detected,
+            "accuracy": hidden_accuracy,
+            "note": (
+                "Fraction of ground-truth hidden-dissatisfaction dialogs "
+                "correctly labelled 'unsatisfied' by the LLM."
+            ),
+        },
+        "scenario_breakdown": scenario_breakdown,
     }
 
 
@@ -262,6 +329,7 @@ def run_analysis(
     provider_name: str,
     model: str | None,
     base_seed: int,
+    filter_by: str = "all",
 ) -> None:
     client, cfg = get_client(provider_name)
     effective_model = model or cfg.default_model
@@ -274,6 +342,17 @@ def run_analysis(
 
     with open(input_path, encoding="utf-8") as fh:
         dataset: list[dict] = json.load(fh)
+
+    # ── Apply filter ────────────────────────────────────────────────
+    if filter_by == "hidden_only":
+        dataset = [d for d in dataset if d.get("hidden_dissatisfaction") is True]
+        print(f"Filter   : hidden_only → {len(dataset)} dialogs")
+    elif filter_by != "all":
+        dataset = [d for d in dataset if d.get("scenario") == filter_by]
+        print(f"Filter   : scenario={filter_by} → {len(dataset)} dialogs")
+
+    if not dataset:
+        sys.exit("ERROR: No dialogs match the given filter. Nothing to analyze.")
 
     print(
         f"Provider : {cfg.name}\n"
@@ -288,7 +367,8 @@ def run_analysis(
         print(
             f"[{dialog['id']:>3}/{len(dataset)}] "
             f"scenario={dialog.get('scenario', '?'):<18} "
-            f"case={dialog.get('case_type', '?'):<12}",
+            f"case={dialog.get('case_type', '?'):<12}"
+            f" hidden={str(dialog.get('hidden_dissatisfaction', '?')):<5}",
             end="  ",
             flush=True,
         )
@@ -299,6 +379,8 @@ def run_analysis(
             "scenario":               dialog.get("scenario"),
             "case_type":              dialog.get("case_type"),
             "hidden_dissatisfaction": dialog.get("hidden_dissatisfaction"),
+            "sub_scenario":           dialog.get("sub_scenario"),
+            "lang":                   dialog.get("lang", "en"),
             **metrics,
         }
         results.append(result)
@@ -307,6 +389,7 @@ def run_analysis(
             f"intent={result['intent']:<18} "
             f"satisfaction={result['satisfaction']:<12} "
             f"score={result['quality_score']} "
+            f"ms={result.get('elapsed_ms', 0):<6} "
             f"mistakes={result['agent_mistakes']}"
         )
 
@@ -316,6 +399,7 @@ def run_analysis(
         "provider": cfg.name,
         "model":    effective_model,
         "seed":     base_seed,
+        "filter":   filter_by,
         "summary":  summary,
         "results":  results,
     }
@@ -326,7 +410,17 @@ def run_analysis(
 
     print(f"\n✓ Analysis saved → {out_path}")
     print("\n── Summary ──────────────────────────────────────────")
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    # Print a concise version (omit scenario_breakdown for brevity)
+    brief = {k: v for k, v in summary.items() if k != "scenario_breakdown"}
+    print(json.dumps(brief, ensure_ascii=False, indent=2))
+    if "hidden_dissatisfaction_accuracy" in summary:
+        hda = summary["hidden_dissatisfaction_accuracy"]
+        acc = hda.get("accuracy")
+        acc_str = f"{acc:.0%}" if acc is not None else "n/a"
+        print(
+            f"\nHidden dissatisfaction detection: "
+            f"{hda['detected_as_unsatisfied']}/{hda['total_hidden_dialogs']} ({acc_str})"
+        )
 
 
 # ─────────────────────────────────────────────
@@ -380,6 +474,19 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="Base random seed for determinism (default: 42)",
     )
+    parser.add_argument(
+        "--filter",
+        dest="filter_by",
+        type=str,
+        default="all",
+        metavar="FILTER",
+        help=(
+            "Filter dialogs before analysis (default: all)\n"
+            "  all          – analyze every dialog\n"
+            "  hidden_only  – only dialogs with hidden_dissatisfaction=true\n"
+            "  <scenario>   – e.g. payment_issue, technical_error, refund, ..."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -391,4 +498,5 @@ if __name__ == "__main__":
         provider_name=args.provider,
         model=args.model,
         base_seed=args.seed,
+        filter_by=args.filter_by,
     )
