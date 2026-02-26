@@ -364,11 +364,6 @@ def run_generation(
         f"{len(skipped_entries)} skipped)"
     )
 
-
-# ─────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────
-
 def parse_args() -> argparse.Namespace:
     default_provider = auto_detect_provider()
     parser = argparse.ArgumentParser(
