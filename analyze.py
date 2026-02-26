@@ -214,7 +214,6 @@ def analyze_dialog(
             elapsed_ms = round((time.monotonic() - t0) * 1000)
             raw_text = response.choices[0].message.content.strip()
 
-            # Strip markdown fences that some models add despite instructions
             if raw_text.startswith("```"):
                 raw_text = raw_text.split("```")[1]
                 if raw_text.startswith("json"):
@@ -251,13 +250,7 @@ def analyze_dialog(
         "analyzed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
-
-# ─────────────────────────────────────────────
-# Thread-safe parallel worker
-# ─────────────────────────────────────────────
-
 _print_lock = threading.Lock()
-
 
 def _analyze_one(args: tuple) -> dict:
     """Worker for ThreadPoolExecutor: wraps analyze_dialog with thread-safe logging."""
