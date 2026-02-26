@@ -27,8 +27,11 @@ Default provider: auto-detected from available env keys
 
 import argparse
 import json
+import random
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +40,9 @@ from dotenv import load_dotenv
 from providers import PROVIDERS, auto_detect_provider, get_client
 
 load_dotenv()
+
+_print_lock = threading.Lock()
+_save_lock  = threading.Lock()
 
 # ─────────────────────────────────────────────
 # Scenario matrix: (scenario, case_type, hidden_dissatisfaction, sub_scenario)
@@ -235,12 +241,60 @@ def generate_dialog(
 
         except (json.JSONDecodeError, ValueError) as exc:
             last_exc = exc
-            print(f"  [warn] attempt {attempt + 1} failed: {exc}", file=sys.stderr)
-            time.sleep(2 ** attempt)
+            backoff = 2 ** attempt + random.uniform(0, 0.5)
+            print(f"  [warn] attempt {attempt + 1} failed: {exc} (retrying in {backoff:.1f}s)", file=sys.stderr)
+            time.sleep(backoff)
 
     raise RuntimeError(
         f"Failed to generate dialog after 3 attempts ({scenario}/{case_type}): {last_exc}"
     )
+
+
+# ─────────────────────────────────────────────
+# Thread-safe parallel worker
+# ─────────────────────────────────────────────
+
+def _generate_one(args: tuple) -> dict:
+    """Worker for ThreadPoolExecutor. Returns a completed dialog entry."""
+    (
+        client, cfg, dialog_id, scenario, case_type, hidden,
+        sub_scenario, dialog_lang, effective_model, seed, count,
+    ) = args
+
+    with _print_lock:
+        print(
+            f"[{dialog_id:>3}/{count}] GEN   scenario={scenario:<18} "
+            f"case={case_type:<12} hidden={str(hidden):<5} "
+            f"lang={dialog_lang} seed={seed}",
+            end="  …\r",
+            flush=True,
+        )
+
+    t0 = time.monotonic()
+    messages = generate_dialog(
+        client, cfg, scenario, case_type, hidden, sub_scenario,
+        dialog_lang, effective_model, seed,
+    )
+    elapsed = round((time.monotonic() - t0) * 1000)
+
+    with _print_lock:
+        print(
+            f"[{dialog_id:>3}/{count}] GEN   scenario={scenario:<18} "
+            f"case={case_type:<12} hidden={str(hidden):<5} "
+            f"lang={dialog_lang}  turns={len(messages)} ({elapsed} ms)"
+        )
+
+    return {
+        "id":                    dialog_id,
+        "scenario":              scenario,
+        "case_type":             case_type,
+        "hidden_dissatisfaction": hidden,
+        "sub_scenario":          sub_scenario,
+        "lang":                  dialog_lang,
+        "seed":                  seed,
+        "generated_at":          datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "messages":              messages,
+    }
 
 
 def run_generation(
@@ -251,11 +305,12 @@ def run_generation(
     base_seed: int = 42,
     lang: str = "en",
     resume: bool = False,
+    workers: int = 3,
 ) -> None:
     client, cfg = get_client(provider_name)
     effective_model = model or cfg.default_model
 
-    # ── resume: load existing dataset ──────────────────────────────
+    # ── Resume: load existing dataset ──────────────────────────────
     existing: dict[int, dict] = {}
     if resume and out_path.exists():
         try:
@@ -271,6 +326,7 @@ def run_generation(
         f"Model    : {effective_model}\n"
         f"Dialogs  : {count}\n"
         f"Language : {lang}\n"
+        f"Workers  : {workers} parallel thread(s)\n"
         f"Output   : {out_path}\n"
     )
 
@@ -278,66 +334,67 @@ def run_generation(
     matrix = SCENARIOS * (count // len(SCENARIOS) + 1)
     matrix = matrix[:count]
 
-    dataset: list[dict] = []
-    skipped = 0
+    # Partition work: skipped vs. to-generate
+    skipped_entries: list[dict] = []
+    work_items: list[tuple] = []
 
     for idx, (scenario, case_type, hidden, sub_scenario) in enumerate(matrix):
         dialog_id = idx + 1
         seed = base_seed + idx
 
-        # Determine language for this dialog
         if lang == "mixed":
             dialog_lang = "en" if idx % 2 == 0 else "uk"
         else:
             dialog_lang = lang
 
-        # Skip if already generated (resume mode)
         if dialog_id in existing:
-            dataset.append(existing[dialog_id])
-            skipped += 1
+            skipped_entries.append(existing[dialog_id])
             print(
                 f"[{dialog_id:>3}/{count}] SKIP  scenario={scenario:<18} "
                 f"case={case_type:<12} (already exists)"
             )
-            continue
+        else:
+            work_items.append((
+                client, cfg, dialog_id, scenario, case_type, hidden,
+                sub_scenario, dialog_lang, effective_model, seed, count,
+            ))
 
-        print(
-            f"[{dialog_id:>3}/{count}] GEN   scenario={scenario:<18} "
-            f"case={case_type:<12} hidden={str(hidden):<5} lang={dialog_lang} seed={seed}",
-            end="  ",
-            flush=True,
-        )
-        t0 = time.monotonic()
-        messages = generate_dialog(
-            client, cfg, scenario, case_type, hidden, sub_scenario,
-            dialog_lang, effective_model, seed,
-        )
-        elapsed = round((time.monotonic() - t0) * 1000)
-        print(f"turns={len(messages)} ({elapsed} ms)")
+    # ── Generate (parallel) ─────────────────────────────────────────
+    new_entries: list[dict] = []
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        dataset.append(
-            {
-                "id": dialog_id,
-                "scenario": scenario,
-                "case_type": case_type,
-                "hidden_dissatisfaction": hidden,
-                "sub_scenario": sub_scenario,
-                "lang": dialog_lang,
-                "seed": seed,
-                "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "messages": messages,
-            }
+    def _save_current() -> None:
+        all_entries = sorted(
+            skipped_entries + new_entries,
+            key=lambda e: e["id"],
         )
-
-        # Save incrementally so progress is not lost on interruption
-        out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as fh:
-            json.dump(dataset, fh, ensure_ascii=False, indent=2)
+            json.dump(all_entries, fh, ensure_ascii=False, indent=2)
 
-    generated = len(dataset) - skipped
+    if workers == 1 or len(work_items) <= 1:
+        for item in work_items:
+            entry = _generate_one(item)
+            new_entries.append(entry)
+            _save_current()   # incremental save
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_generate_one, item): item for item in work_items}
+            for future in as_completed(futures):
+                try:
+                    entry = future.result()
+                    with _save_lock:
+                        new_entries.append(entry)
+                        _save_current()     # incremental thread-safe save
+                except Exception as exc:
+                    with _print_lock:
+                        print(f"[error] worker failed: {exc}", file=sys.stderr)
+
+    total_entries = len(skipped_entries) + len(new_entries)
     print(
         f"\n✓ Dataset saved → {out_path}  "
-        f"({len(dataset)} dialogs total, {generated} newly generated, {skipped} skipped)"
+        f"({total_entries} dialogs total, "
+        f"{len(new_entries)} newly generated, "
+        f"{len(skipped_entries)} skipped)"
     )
 
 
@@ -410,6 +467,16 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Skip dialogs already present in the output file (useful after interruption)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "Number of parallel LLM generation calls (default: 3).\n"
+            "Set to 1 for sequential generation (easier to debug)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -423,4 +490,5 @@ if __name__ == "__main__":
         base_seed=args.seed,
         lang=args.lang,
         resume=args.resume,
+        workers=args.workers,
     )
