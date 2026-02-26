@@ -47,10 +47,6 @@ from providers import PROVIDERS, auto_detect_provider, get_client
 
 load_dotenv()
 
-# ─────────────────────────────────────────────
-# ANSI color helpers (gracefully disabled via --no-color)
-# ─────────────────────────────────────────────
-
 _NO_COLOR = False
 
 
@@ -59,14 +55,12 @@ def _c(code: str, text: str) -> str:
         return text
     return f"\033[{code}m{text}\033[0m"
 
-
 def green(t: str) -> str:   return _c("32", t)
 def yellow(t: str) -> str:  return _c("33", t)
 def red(t: str) -> str:     return _c("31", t)
 def cyan(t: str) -> str:    return _c("36", t)
 def bold(t: str) -> str:    return _c("1",  t)
 def dim(t: str) -> str:     return _c("2",  t)
-
 
 def color_score(score: int) -> str:
     if score >= 4:
@@ -75,15 +69,9 @@ def color_score(score: int) -> str:
         return yellow(str(score))
     return red(str(score))
 
-
 def color_satisfaction(sat: str) -> str:
     mapping: dict = {"satisfied": green, "neutral": yellow, "unsatisfied": red}
     return mapping.get(sat, str)(sat)
-
-
-# ─────────────────────────────────────────────
-# Allowed enum values (used both in the prompt and for validation)
-# ─────────────────────────────────────────────
 
 VALID_INTENTS = {
     "payment_issue",
@@ -103,10 +91,6 @@ VALID_MISTAKES = {
     "no_resolution",
     "unnecessary_escalation",
 }
-
-# ─────────────────────────────────────────────
-# Prompt
-# ─────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are a quality-assurance analyst for a customer support team.
 Your task is to evaluate support-chat transcripts and return a structured JSON assessment.
@@ -150,7 +134,6 @@ Mistake definitions:
 
 
 def build_analysis_prompt(dialog: dict) -> str:
-    # Format the transcript
     lines = []
     for msg in dialog["messages"]:
         role = msg["role"].upper()
@@ -163,11 +146,6 @@ def build_analysis_prompt(dialog: dict) -> str:
         f"{QUALITY_RUBRIC}\n{MISTAKE_DEFINITIONS}\n"
         f"Return ONLY a JSON object matching this schema:\n{ANALYSIS_SCHEMA}"
     )
-
-
-# ─────────────────────────────────────────────
-# Validation helpers
-# ─────────────────────────────────────────────
 
 def validate_and_clean(raw: dict) -> dict:
     """Validate LLM output fields and coerce to known values where possible."""
@@ -193,9 +171,8 @@ def validate_and_clean(raw: dict) -> dict:
         for m in raw_mistakes
         if isinstance(m, str) and m.strip().lower() in VALID_MISTAKES
     ]
-    # Deduplicate while preserving order
     seen: set[str] = set()
-    agent_mistakes = [m for m in agent_mistakes if not (m in seen or seen.add(m))]  # type: ignore[func-returns-value]
+    agent_mistakes = [m for m in agent_mistakes if not (m in seen or seen.add(m))] 
 
     reasoning = str(raw.get("reasoning", "")).strip()
 
@@ -206,11 +183,6 @@ def validate_and_clean(raw: dict) -> dict:
         "agent_mistakes": agent_mistakes,
         "reasoning": reasoning,
     }
-
-
-# ─────────────────────────────────────────────
-# LLM call
-# ─────────────────────────────────────────────
 
 def analyze_dialog(
     client,
@@ -224,13 +196,12 @@ def analyze_dialog(
 
     call_kwargs: dict = {
         "model": model,
-        "temperature": 0.0,   # deterministic analysis
+        "temperature": 0.0,   
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": prompt},
         ],
     }
-    # Only pass response_format when the provider supports JSON-object mode
     if cfg.supports_json_mode:
         call_kwargs["response_format"] = {"type": "json_object"}
     if cfg.supports_seed:
