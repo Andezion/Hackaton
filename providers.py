@@ -55,15 +55,15 @@ from openai import OpenAI
 class ProviderConfig:
     name: str
     env_var: str
-    base_url: str | None          # None → use OpenAI default
+    base_url: str | None          
     default_model: str
-    supports_seed: bool = True    # some providers ignore the seed param
-    supports_json_mode: bool = True  # whether response_format=json_object is supported
+    supports_seed: bool = True    
+    supports_json_mode: bool = True  
     extra_kwargs: dict = field(default_factory=dict)
 
 
 PROVIDERS: dict[str, ProviderConfig] = {
-    # ── Free providers ───────────────────────────────────────────────────────
+    
     "deepseek": ProviderConfig(
         name="DeepSeek",
         env_var="DEEPSEEK_API_KEY",
@@ -77,7 +77,7 @@ PROVIDERS: dict[str, ProviderConfig] = {
         env_var="DASHSCOPE_API_KEY",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         default_model="qwen-turbo",
-        supports_seed=False,      # DashScope ignores seed; temperature=0 for determinism
+        supports_seed=False,      
         supports_json_mode=True,
     ),
     "groq": ProviderConfig(
@@ -110,7 +110,7 @@ PROVIDERS: dict[str, ProviderConfig] = {
         base_url="https://api.together.xyz/v1",
         default_model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
         supports_seed=False,
-        supports_json_mode=False,  # free Llama models on Together don't support json_object
+        supports_json_mode=False,  
     ),
     "openrouter": ProviderConfig(
         name="OpenRouter",
@@ -118,9 +118,9 @@ PROVIDERS: dict[str, ProviderConfig] = {
         base_url="https://openrouter.ai/api/v1",
         default_model="meta-llama/llama-3.1-8b-instruct:free",
         supports_seed=False,
-        supports_json_mode=False,  # free models vary; skip to stay safe
+        supports_json_mode=False,  
     ),
-    # ── Paid fallback ────────────────────────────────────────────────────────
+    
     "openai": ProviderConfig(
         name="OpenAI",
         env_var="OPENAI_API_KEY",
@@ -131,7 +131,6 @@ PROVIDERS: dict[str, ProviderConfig] = {
     ),
 }
 
-# Detection priority: cheapest/fastest free providers first
 _DETECT_ORDER = ["deepseek", "qwen", "groq", "gemini", "mistral", "together", "openrouter", "openai"]
 
 
@@ -182,4 +181,4 @@ def auto_detect_provider() -> str:
         cfg = PROVIDERS[name]
         if os.getenv(cfg.env_var):
             return name
-    return "deepseek"   # will fail with a clear message if key is missing
+    return "deepseek"   
