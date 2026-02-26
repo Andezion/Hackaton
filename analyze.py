@@ -25,12 +25,19 @@ Usage:
     python analyze.py [--input data/chats.json] [--out results/analysis.json]
                       [--provider PROVIDER] [--model MODEL] [--seed 42]
                       [--filter all|hidden_only|<scenario>]
+                      [--workers N]     (parallel LLM calls, default: 4)
+                      [--resume]        (skip already-analyzed dialogs)
+                      [--csv PATH]      (also export results to CSV)
 """
 
 import argparse
+import csv
 import json
+import random
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,6 +46,40 @@ from dotenv import load_dotenv
 from providers import PROVIDERS, auto_detect_provider, get_client
 
 load_dotenv()
+
+# ─────────────────────────────────────────────
+# ANSI color helpers (gracefully disabled via --no-color)
+# ─────────────────────────────────────────────
+
+_NO_COLOR = False
+
+
+def _c(code: str, text: str) -> str:
+    if _NO_COLOR:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def green(t: str) -> str:   return _c("32", t)
+def yellow(t: str) -> str:  return _c("33", t)
+def red(t: str) -> str:     return _c("31", t)
+def cyan(t: str) -> str:    return _c("36", t)
+def bold(t: str) -> str:    return _c("1",  t)
+def dim(t: str) -> str:     return _c("2",  t)
+
+
+def color_score(score: int) -> str:
+    if score >= 4:
+        return green(str(score))
+    if score == 3:
+        return yellow(str(score))
+    return red(str(score))
+
+
+def color_satisfaction(sat: str) -> str:
+    mapping: dict = {"satisfied": green, "neutral": yellow, "unsatisfied": red}
+    return mapping.get(sat, str)(sat)
+
 
 # ─────────────────────────────────────────────
 # Allowed enum values (used both in the prompt and for validation)
@@ -215,14 +256,19 @@ def analyze_dialog(
             return result
 
         except (json.JSONDecodeError, KeyError) as exc:
+            backoff = 2 ** attempt + random.uniform(0, 0.5)
+            did = dialog["id"]
+            warn_msg = f"[warn] dialog {did} attempt {attempt + 1} failed: {exc}"
             print(
-                f"  [warn] dialog {dialog['id']} attempt {attempt + 1} failed: {exc}",
+                f"  {yellow(warn_msg)}  retrying in {backoff:.1f}s",
                 file=sys.stderr,
             )
-            time.sleep(2 ** attempt)
+            time.sleep(backoff)
 
+    did = dialog["id"]
     print(
-        f"  [error] dialog {dialog['id']}: returning default metrics.", file=sys.stderr
+        f"  {red(f'[error] dialog {did}: returning default metrics.')}",
+        file=sys.stderr,
     )
     return {
         "intent": "other",
@@ -233,6 +279,78 @@ def analyze_dialog(
         "elapsed_ms": 0,
         "analyzed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+
+
+# ─────────────────────────────────────────────
+# Thread-safe parallel worker
+# ─────────────────────────────────────────────
+
+_print_lock = threading.Lock()
+
+
+def _analyze_one(args: tuple) -> dict:
+    """Worker for ThreadPoolExecutor: wraps analyze_dialog with thread-safe logging."""
+    client, cfg, dialog, model, seed, idx, total = args
+
+    with _print_lock:
+        print(
+            f"  {dim(f'[{idx:>3}/{total}]')} "
+            f"scenario={cyan(str(dialog.get('scenario', '?'))):<28} "
+            f"case={dialog.get('case_type', '?'):<12} "
+            f"hidden={str(dialog.get('hidden_dissatisfaction', '?')):<5}",
+            end="  …\r",
+            flush=True,
+        )
+
+    metrics = analyze_dialog(client, cfg, dialog, model, seed)
+
+    result = {
+        "dialog_id":              dialog["id"],
+        "scenario":               dialog.get("scenario"),
+        "case_type":              dialog.get("case_type"),
+        "hidden_dissatisfaction": dialog.get("hidden_dissatisfaction"),
+        "sub_scenario":           dialog.get("sub_scenario"),
+        "lang":                   dialog.get("lang", "en"),
+        **metrics,
+    }
+
+    mistakes_str = (
+        ", ".join(result["agent_mistakes"]) if result["agent_mistakes"] else dim("—")
+    )
+    ms_val = result.get("elapsed_ms", 0)
+    with _print_lock:
+        print(
+            f"  {dim(f'[{idx:>3}/{total}]')} "
+            f"scenario={cyan(str(result['scenario'])):<28} "
+            f"intent={result['intent']:<18} "
+            f"sat={color_satisfaction(result['satisfaction']):<22} "
+            f"score={color_score(result['quality_score'])} "
+            f"{dim(f'ms={ms_val:<6}')} "
+            f"[{mistakes_str}]"
+        )
+    return result
+
+
+# ─────────────────────────────────────────────
+# CSV export
+# ─────────────────────────────────────────────
+
+def export_csv(results: list[dict], csv_path: Path) -> None:
+    """Write results to a flat CSV file for easy spreadsheet analysis."""
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "dialog_id", "scenario", "case_type", "hidden_dissatisfaction",
+        "sub_scenario", "lang", "intent", "satisfaction", "quality_score",
+        "agent_mistakes", "reasoning", "elapsed_ms", "analyzed_at",
+    ]
+    with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for r in results:
+            row = dict(r)
+            row["agent_mistakes"] = "|".join(r.get("agent_mistakes", []))
+            writer.writerow(row)
+    print(f"{green('✓')} CSV  saved → {bold(str(csv_path))}")
 
 
 # ─────────────────────────────────────────────
@@ -330,6 +448,9 @@ def run_analysis(
     model: str | None,
     base_seed: int,
     filter_by: str = "all",
+    workers: int = 4,
+    resume: bool = False,
+    csv_path: Path | None = None,
 ) -> None:
     client, cfg = get_client(provider_name)
     effective_model = model or cfg.default_model
@@ -354,44 +475,67 @@ def run_analysis(
     if not dataset:
         sys.exit("ERROR: No dialogs match the given filter. Nothing to analyze.")
 
+    # ── Resume: load already-analyzed dialogs ───────────────────────
+    existing_results: dict[int, dict] = {}
+    if resume and out_path.exists():
+        try:
+            with open(out_path, encoding="utf-8") as fh:
+                saved = json.load(fh)
+            for r in saved.get("results", []):
+                existing_results[r["dialog_id"]] = r
+            print(
+                f"Resume   : {dim(str(len(existing_results)))} already-analyzed "
+                f"dialog(s) loaded, will skip them."
+            )
+        except (json.JSONDecodeError, KeyError) as exc:
+            print(
+                f"{yellow(f'[warn] Could not load existing results for resume: {exc}')}",
+                file=sys.stderr,
+            )
+
+    pending = [d for d in dataset if d.get("id") not in existing_results]
+    skipped = len(dataset) - len(pending)
+
     print(
-        f"Provider : {cfg.name}\n"
-        f"Model    : {effective_model}\n"
-        f"Loaded   : {len(dataset)} dialogs from {input_path}\n"
+        f"\n{bold('Provider')} : {cyan(cfg.name)}\n"
+        f"{bold('Model')}    : {cyan(effective_model)}\n"
+        f"{bold('Dialogs')}  : {len(dataset)} loaded  "
+        f"{green(str(len(pending)))} to analyze  {dim(str(skipped) + ' skipped')}\n"
+        f"{bold('Workers')}  : {workers} parallel thread(s)\n"
+        f"{bold('Input')}    : {input_path}\n"
     )
 
-    results = []
+    # ── Parallel analysis ────────────────────────────────────────────
+    new_results: list[dict] = []
+    wall_start = time.monotonic()
 
-    for dialog in dataset:
-        seed = base_seed + dialog.get("id", 0)
-        print(
-            f"[{dialog['id']:>3}/{len(dataset)}] "
-            f"scenario={dialog.get('scenario', '?'):<18} "
-            f"case={dialog.get('case_type', '?'):<12}"
-            f" hidden={str(dialog.get('hidden_dissatisfaction', '?')):<5}",
-            end="  ",
-            flush=True,
-        )
-        metrics = analyze_dialog(client, cfg, dialog, effective_model, seed)
+    if workers == 1 or len(pending) <= 1:
+        for idx, dialog in enumerate(pending, start=skipped + 1):
+            seed = base_seed + dialog.get("id", 0)
+            new_results.append(
+                _analyze_one((client, cfg, dialog, effective_model, seed, idx, len(dataset)))
+            )
+    else:
+        work_items = [
+            (client, cfg, d, effective_model, base_seed + d.get("id", 0), idx, len(dataset))
+            for idx, d in enumerate(pending, start=skipped + 1)
+        ]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_analyze_one, item): item for item in work_items}
+            for future in as_completed(futures):
+                try:
+                    new_results.append(future.result())
+                except Exception as exc:
+                    with _print_lock:
+                        print(f"{red(f'[error] worker failed: {exc}')}", file=sys.stderr)
 
-        result = {
-            "dialog_id":              dialog["id"],
-            "scenario":               dialog.get("scenario"),
-            "case_type":              dialog.get("case_type"),
-            "hidden_dissatisfaction": dialog.get("hidden_dissatisfaction"),
-            "sub_scenario":           dialog.get("sub_scenario"),
-            "lang":                   dialog.get("lang", "en"),
-            **metrics,
-        }
-        results.append(result)
+    wall_elapsed = round((time.monotonic() - wall_start) * 1000)
 
-        print(
-            f"intent={result['intent']:<18} "
-            f"satisfaction={result['satisfaction']:<12} "
-            f"score={result['quality_score']} "
-            f"ms={result.get('elapsed_ms', 0):<6} "
-            f"mistakes={result['agent_mistakes']}"
-        )
+    # Merge new + previously-skipped, sort by dialog_id
+    results = sorted(
+        list(existing_results.values()) + new_results,
+        key=lambda r: r["dialog_id"],
+    )
 
     summary = compute_summary(results)
 
@@ -408,19 +552,50 @@ def run_analysis(
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(output, fh, ensure_ascii=False, indent=2)
 
-    print(f"\n✓ Analysis saved → {out_path}")
-    print("\n── Summary ──────────────────────────────────────────")
-    # Print a concise version (omit scenario_breakdown for brevity)
+    if csv_path:
+        export_csv(results, csv_path)
+
+    print(f"\n{green('✓')} Analysis saved → {bold(str(out_path))}")
+    if pending:
+        per_dialog = round(wall_elapsed / len(pending))
+        print(
+            f"  Wall time : {wall_elapsed} ms for {len(pending)} dialog(s) "
+            f"({per_dialog} ms/dialog avg)"
+        )
+
+    print(f"\n{bold('── Summary ──────────────────────────────────────────')}")
     brief = {k: v for k, v in summary.items() if k != "scenario_breakdown"}
     print(json.dumps(brief, ensure_ascii=False, indent=2))
+
     if "hidden_dissatisfaction_accuracy" in summary:
         hda = summary["hidden_dissatisfaction_accuracy"]
         acc = hda.get("accuracy")
         acc_str = f"{acc:.0%}" if acc is not None else "n/a"
+        color_fn = green if (acc or 0) >= 0.7 else (yellow if (acc or 0) >= 0.4 else red)
         print(
-            f"\nHidden dissatisfaction detection: "
-            f"{hda['detected_as_unsatisfied']}/{hda['total_hidden_dialogs']} ({acc_str})"
+            f"\n{bold('Hidden dissatisfaction detection:')} "
+            f"{hda['detected_as_unsatisfied']}/{hda['total_hidden_dialogs']} "
+            f"({color_fn(acc_str)})"
         )
+
+    if summary.get("scenario_breakdown"):
+        print(f"\n{bold('── Scenario Breakdown ───────────────────────────────')}")
+        print(f"  {'Scenario':<22} {'Avg':>5}  Sat  Neu  Unsat")
+        print(f"  {'-'*22} {'-'*5}  ---  ---  -----")
+        for sc, info in summary["scenario_breakdown"].items():
+            sat_d = info["satisfaction"]
+            avg = info["avg_quality_score"]
+            avg_c = (
+                green(f"{avg:.2f}") if avg >= 4
+                else (yellow(f"{avg:.2f}") if avg >= 3 else red(f"{avg:.2f}"))
+            )
+            print(
+                f"  {sc:<22} {avg_c}  "
+                f"{green(str(sat_d.get('satisfied', 0))):>4}  "
+                f"{yellow(str(sat_d.get('neutral', 0))):>4}  "
+                f"{red(str(sat_d.get('unsatisfied', 0))):>5}"
+            )
+
 
 
 # ─────────────────────────────────────────────
@@ -487,11 +662,42 @@ def parse_args() -> argparse.Namespace:
             "  <scenario>   – e.g. payment_issue, technical_error, refund, ..."
         ),
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        metavar="N",
+        help=(
+            "Parallel LLM calls (default: 4).\n"
+            "Set to 1 to disable concurrency (sequential, easier to debug)."
+        ),
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Skip dialogs already present in --out (saves API calls after interruption).",
+    )
+    parser.add_argument(
+        "--csv",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Also export results to a flat CSV file (e.g. results/analysis.csv).",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        default=False,
+        help="Disable ANSI color output.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    if args.no_color:
+        _NO_COLOR = True
     run_analysis(
         input_path=args.input,
         out_path=args.out,
@@ -499,4 +705,7 @@ if __name__ == "__main__":
         model=args.model,
         base_seed=args.seed,
         filter_by=args.filter_by,
+        workers=args.workers,
+        resume=args.resume,
+        csv_path=args.csv,
     )
