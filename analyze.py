@@ -294,11 +294,6 @@ def _analyze_one(args: tuple) -> dict:
         )
     return result
 
-
-# ─────────────────────────────────────────────
-# CSV export
-# ─────────────────────────────────────────────
-
 def export_csv(results: list[dict], csv_path: Path) -> None:
     """Write results to a flat CSV file for easy spreadsheet analysis."""
     csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -316,11 +311,6 @@ def export_csv(results: list[dict], csv_path: Path) -> None:
             writer.writerow(row)
     print(f"{green('✓')} CSV  saved → {bold(str(csv_path))}")
 
-
-# ─────────────────────────────────────────────
-# Summary statistics
-# ─────────────────────────────────────────────
-
 def compute_summary(results: list[dict]) -> dict:
     total = len(results)
     if total == 0:
@@ -332,12 +322,10 @@ def compute_summary(results: list[dict]) -> dict:
     total_score = 0
     total_elapsed = 0
 
-    # Per-scenario accumulators: {scenario: {score_sum, count, satisfaction counts}}
     scenario_acc: dict[str, dict] = {}
 
-    # Hidden dissatisfaction accuracy
     hidden_total = 0
-    hidden_detected = 0  # labeled unsatisfied when ground-truth hidden=True
+    hidden_detected = 0 
 
     for r in results:
         intent_dist[r["intent"]] = intent_dist.get(r["intent"], 0) + 1
@@ -349,7 +337,6 @@ def compute_summary(results: list[dict]) -> dict:
         for m in r["agent_mistakes"]:
             mistake_dist[m] = mistake_dist.get(m, 0) + 1
 
-        # Scenario breakdown
         sc = r.get("scenario") or "unknown"
         if sc not in scenario_acc:
             scenario_acc[sc] = {"score_sum": 0, "count": 0, "satisfaction": {}}
@@ -360,7 +347,6 @@ def compute_summary(results: list[dict]) -> dict:
             scenario_acc[sc]["satisfaction"].get(sat, 0) + 1
         )
 
-        # Hidden dissatisfaction accuracy
         if r.get("hidden_dissatisfaction") is True:
             hidden_total += 1
             if r["satisfaction"] == "unsatisfied":
@@ -399,11 +385,6 @@ def compute_summary(results: list[dict]) -> dict:
         },
         "scenario_breakdown": scenario_breakdown,
     }
-
-
-# ─────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────
 
 def run_analysis(
     input_path: Path,
