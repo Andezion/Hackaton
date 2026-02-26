@@ -409,7 +409,6 @@ def run_analysis(
     with open(input_path, encoding="utf-8") as fh:
         dataset: list[dict] = json.load(fh)
 
-    # ── Apply filter ────────────────────────────────────────────────
     if filter_by == "hidden_only":
         dataset = [d for d in dataset if d.get("hidden_dissatisfaction") is True]
         print(f"Filter   : hidden_only → {len(dataset)} dialogs")
@@ -420,7 +419,6 @@ def run_analysis(
     if not dataset:
         sys.exit("ERROR: No dialogs match the given filter. Nothing to analyze.")
 
-    # ── Resume: load already-analyzed dialogs ───────────────────────
     existing_results: dict[int, dict] = {}
     if resume and out_path.exists():
         try:
@@ -449,8 +447,6 @@ def run_analysis(
         f"{bold('Workers')}  : {workers} parallel thread(s)\n"
         f"{bold('Input')}    : {input_path}\n"
     )
-
-    # ── Parallel analysis ────────────────────────────────────────────
     new_results: list[dict] = []
     wall_start = time.monotonic()
 
@@ -476,7 +472,6 @@ def run_analysis(
 
     wall_elapsed = round((time.monotonic() - wall_start) * 1000)
 
-    # Merge new + previously-skipped, sort by dialog_id
     results = sorted(
         list(existing_results.values()) + new_results,
         key=lambda r: r["dialog_id"],
@@ -540,12 +535,6 @@ def run_analysis(
                 f"{yellow(str(sat_d.get('neutral', 0))):>4}  "
                 f"{red(str(sat_d.get('unsatisfied', 0))):>5}"
             )
-
-
-
-# ─────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
     default_provider = auto_detect_provider()
