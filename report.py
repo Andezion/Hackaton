@@ -26,12 +26,7 @@ import json
 import sys
 from pathlib import Path
 
-# ─────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────
-
-BAR_WIDTH = 20   # max width of ASCII bar charts
-
+BAR_WIDTH = 20  
 
 def bar(value: int, total: int, width: int = BAR_WIDTH) -> str:
     """Return a Unicode progress bar string."""
@@ -64,11 +59,6 @@ def md_table(headers: list[str], rows: list[list[str]]) -> str:
         lines.append("| " + " | ".join(str(c) for c in row) + " |")
     return "\n".join(lines)
 
-
-# ─────────────────────────────────────────────
-# Report builder
-# ─────────────────────────────────────────────
-
 def build_report(data: dict, title: str) -> str:
     summary = data.get("summary", {})
     results = data.get("results", [])
@@ -80,7 +70,6 @@ def build_report(data: dict, title: str) -> str:
 
     lines: list[str] = []
 
-    # ── Header ────────────────────────────────────────────────────
     lines += [
         f"# {title}",
         "",
@@ -96,7 +85,6 @@ def build_report(data: dict, title: str) -> str:
         "",
     ]
 
-    # ── Quality score distribution ────────────────────────────────
     lines += ["## Quality Score Distribution", ""]
     score_counts: dict[int, int] = {i: 0 for i in range(1, 6)}
     for r in results:
@@ -114,7 +102,6 @@ def build_report(data: dict, title: str) -> str:
         )
     lines += ["", "---", ""]
 
-    # ── Satisfaction distribution ─────────────────────────────────
     lines += ["## Satisfaction Distribution", ""]
     sat_dist = summary.get("satisfaction_distribution", {})
     lines.append("| Satisfaction | Count | Bar |")
@@ -126,7 +113,6 @@ def build_report(data: dict, title: str) -> str:
         )
     lines += ["", "---", ""]
 
-    # ── Intent distribution ───────────────────────────────────────
     lines += ["## Intent Distribution", ""]
     intent_dist = summary.get("intent_distribution", {})
     i_rows = [
@@ -136,7 +122,6 @@ def build_report(data: dict, title: str) -> str:
     lines.append(md_table(["Intent", "Count", "%", "Bar"], i_rows))
     lines += ["", "---", ""]
 
-    # ── Agent mistake frequency ───────────────────────────────────
     lines += ["## Agent Mistake Frequency", ""]
     mistake_freq = summary.get("mistake_frequency", {})
     if mistake_freq:
@@ -150,7 +135,6 @@ def build_report(data: dict, title: str) -> str:
         lines.append("_No agent mistakes detected._")
     lines += ["", "---", ""]
 
-    # ── Hidden dissatisfaction accuracy ──────────────────────────
     hda = summary.get("hidden_dissatisfaction_accuracy", {})
     if hda:
         lines += ["## Hidden Dissatisfaction Detection", ""]
@@ -168,7 +152,6 @@ def build_report(data: dict, title: str) -> str:
             "",
         ]
 
-    # ── Per-scenario breakdown ────────────────────────────────────
     scene_breakdown = summary.get("scenario_breakdown", {})
     if scene_breakdown:
         lines += ["## Scenario Breakdown", ""]
@@ -189,7 +172,6 @@ def build_report(data: dict, title: str) -> str:
         ))
         lines += ["", "---", ""]
 
-    # ── Top 5 lowest-scoring dialogs ──────────────────────────────
     sorted_results = sorted(results, key=lambda r: (r.get("quality_score", 3), r.get("dialog_id", 0)))
     lines += ["## 🔴 5 Lowest-Scoring Dialogs (Need Attention)", ""]
     worst = sorted_results[:5]
@@ -210,7 +192,6 @@ def build_report(data: dict, title: str) -> str:
     ))
     lines += ["", "---", ""]
 
-    # ── Top 5 highest-scoring dialogs ────────────────────────────
     best = sorted(results, key=lambda r: (-r.get("quality_score", 3), r.get("dialog_id", 0)))[:5]
     lines += ["## 🟢 5 Highest-Scoring Dialogs (Best Examples)", ""]
     b_rows = []
@@ -229,7 +210,6 @@ def build_report(data: dict, title: str) -> str:
     ))
     lines += ["", "---", ""]
 
-    # ── Full per-dialog table ─────────────────────────────────────
     lines += ["## Full Dialog Results", ""]
     all_rows = []
     for r in results:
@@ -261,11 +241,6 @@ def build_report(data: dict, title: str) -> str:
     ]
 
     return "\n".join(lines)
-
-
-# ─────────────────────────────────────────────
-# Interactive HTML dashboard
-# ─────────────────────────────────────────────
 
 def build_html_report(data: dict, title: str) -> str:
     """Build a fully self-contained interactive HTML report with Chart.js."""
@@ -310,7 +285,6 @@ def build_html_report(data: dict, title: str) -> str:
     hda_cls      = "good" if (hda_acc or 0) >= 0.7 else ("warn" if (hda_acc or 0) >= 0.4 else "bad")
     qs_cls       = "good" if avg_qs >= 4 else ("warn" if avg_qs >= 3 else "bad")
 
-    # ── Dialog table rows ─────────────────────────────────────────
     table_rows: list[str] = []
     for r in results:
         score     = r.get("quality_score", 0)
@@ -337,7 +311,6 @@ def build_html_report(data: dict, title: str) -> str:
             f'</tr>'
         )
 
-    # ── Scenario breakdown rows ───────────────────────────────────
     sc_rows: list[str] = []
     for sc, info in sorted(scene_breakdown.items()):
         avg   = info.get("avg_quality_score", 0)
@@ -598,11 +571,6 @@ applyFilters();
 </body>
 </html>"""
 
-
-# ─────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────
-
 def run_report(
     input_path: Path,
     out_path: Path,
@@ -620,14 +588,12 @@ def run_report(
 
     print(f"Loaded   : {input_path}")
 
-    # Markdown report
     report_md = build_report(data, title)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(report_md)
     print(f"✓ Markdown saved → {out_path}")
 
-    # HTML dashboard (default: same dir, same stem, .html)
     effective_html = html_path if html_path else out_path.with_suffix(".html")
     html_content = build_html_report(data, title)
     effective_html.parent.mkdir(parents=True, exist_ok=True)
