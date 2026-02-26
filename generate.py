@@ -44,49 +44,37 @@ load_dotenv()
 _print_lock = threading.Lock()
 _save_lock  = threading.Lock()
 
-# ─────────────────────────────────────────────
-# Scenario matrix: (scenario, case_type, hidden_dissatisfaction, sub_scenario)
-# ─────────────────────────────────────────────
 SCENARIOS: list[tuple[str, str, bool, str]] = [
-    # ── payment_issue ──────────────────────────────────────────────
     ("payment_issue",    "successful",    False, "duplicate charge on credit card"),
     ("payment_issue",    "problematic",   False, "payment declined at checkout"),
     ("payment_issue",    "conflict",      False, "wrong amount charged, client escalates"),
     ("payment_issue",    "agent_error",   False, "agent gives wrong refund timeline"),
     ("payment_issue",    "problematic",   True,  "subscription renewed unexpectedly, hidden frustration"),
 
-    # ── technical_error ────────────────────────────────────────────
     ("technical_error",  "successful",    False, "app crashes on login after update"),
     ("technical_error",  "problematic",   False, "feature broken for 3 days, no ETA"),
     ("technical_error",  "conflict",      False, "data lost after server migration"),
     ("technical_error",  "agent_error",   False, "agent blames client's device incorrectly"),
     ("technical_error",  "problematic",   True,  "intermittent 500 errors, client accepts workaround reluctantly"),
 
-    # ── account_access ─────────────────────────────────────────────
     ("account_access",   "successful",    False, "2FA loop preventing login"),
     ("account_access",   "problematic",   False, "account locked after failed attempts"),
     ("account_access",   "conflict",      False, "account suspended without notice"),
     ("account_access",   "agent_error",   False, "agent sends reset link to wrong email"),
     ("account_access",   "successful",    True,  "password reset done but sessions still invalid"),
 
-    # ── tariff_question ────────────────────────────────────────────
     ("tariff_question",  "successful",    False, "comparing Pro vs Business plan features"),
     ("tariff_question",  "problematic",   False, "unclear what is included in current plan"),
     ("tariff_question",  "conflict",      False, "price increased without prior notice"),
     ("tariff_question",  "agent_error",   False, "agent quotes incorrect pricing, not corrected"),
     ("tariff_question",  "problematic",   True,  "downgrade request acknowledged but not processed"),
 
-    # ── refund ─────────────────────────────────────────────────────
     ("refund",           "successful",    False, "refund for accidental annual subscription"),
     ("refund",           "problematic",   False, "refund outside policy window, partial offered"),
     ("refund",           "conflict",      False, "client demands refund, policy dispute"),
     ("refund",           "agent_error",   False, "agent promises refund but it never arrives"),
     ("refund",           "conflict",      True,  "refund denied but client accepts politely out of exhaustion"),
 ]
-
-# ─────────────────────────────────────────────
-# Prompt helpers
-# ─────────────────────────────────────────────
 
 SCENARIO_DESC = {
     "payment_issue":   "a payment processing problem (duplicate charge, declined card, wrong amount, etc.)",
@@ -158,11 +146,6 @@ Rules:
 The first message must be from the client.
 """
 
-
-# ─────────────────────────────────────────────
-# Validation helpers
-# ─────────────────────────────────────────────
-
 def validate_messages(messages: list[dict]) -> list[dict]:
     """
     Ensure messages alternate roles (client/agent) and start with client.
@@ -181,11 +164,6 @@ def validate_messages(messages: list[dict]) -> list[dict]:
         if cleaned[i]["role"] == cleaned[i - 1]["role"]:
             raise ValueError(f"Consecutive same-role messages at index {i}.")
     return cleaned
-
-
-# ─────────────────────────────────────────────
-# Generation
-# ─────────────────────────────────────────────
 
 def generate_dialog(
     client,
@@ -215,11 +193,10 @@ def generate_dialog(
             {"role": "user", "content": prompt},
         ],
     }
-    # Only pass response_format when the provider supports it
+    
     if cfg.supports_json_mode:
         call_kwargs["response_format"] = {"type": "json_object"}
 
-    # Some providers support deterministic seed; others ignore it gracefully
     if cfg.supports_seed:
         call_kwargs["seed"] = seed
 
@@ -229,7 +206,6 @@ def generate_dialog(
             response = client.chat.completions.create(**call_kwargs)
             raw = response.choices[0].message.content.strip()
 
-            # Strip markdown fences that some models add despite instructions
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
@@ -248,11 +224,6 @@ def generate_dialog(
     raise RuntimeError(
         f"Failed to generate dialog after 3 attempts ({scenario}/{case_type}): {last_exc}"
     )
-
-
-# ─────────────────────────────────────────────
-# Thread-safe parallel worker
-# ─────────────────────────────────────────────
 
 def _generate_one(args: tuple) -> dict:
     """Worker for ThreadPoolExecutor. Returns a completed dialog entry."""
@@ -310,7 +281,6 @@ def run_generation(
     client, cfg = get_client(provider_name)
     effective_model = model or cfg.default_model
 
-    # ── Resume: load existing dataset ──────────────────────────────
     existing: dict[int, dict] = {}
     if resume and out_path.exists():
         try:
@@ -330,11 +300,9 @@ def run_generation(
         f"Output   : {out_path}\n"
     )
 
-    # Cycle through the scenario matrix to reach the requested count
     matrix = SCENARIOS * (count // len(SCENARIOS) + 1)
     matrix = matrix[:count]
 
-    # Partition work: skipped vs. to-generate
     skipped_entries: list[dict] = []
     work_items: list[tuple] = []
 
@@ -359,7 +327,6 @@ def run_generation(
                 sub_scenario, dialog_lang, effective_model, seed, count,
             ))
 
-    # ── Generate (parallel) ─────────────────────────────────────────
     new_entries: list[dict] = []
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -375,7 +342,7 @@ def run_generation(
         for item in work_items:
             entry = _generate_one(item)
             new_entries.append(entry)
-            _save_current()   # incremental save
+            _save_current()   
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(_generate_one, item): item for item in work_items}
@@ -384,7 +351,7 @@ def run_generation(
                     entry = future.result()
                     with _save_lock:
                         new_entries.append(entry)
-                        _save_current()     # incremental thread-safe save
+                        _save_current()     
                 except Exception as exc:
                     with _print_lock:
                         print(f"[error] worker failed: {exc}", file=sys.stderr)
