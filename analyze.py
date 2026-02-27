@@ -35,6 +35,7 @@ import csv
 import json
 import random
 import sys
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -207,7 +208,7 @@ def analyze_dialog(
     if cfg.supports_seed:
         call_kwargs["seed"] = seed
 
-    for attempt in range(3):
+    for attempt in range(10):
         try:
             t0 = time.monotonic()
             response = client.chat.completions.create(**call_kwargs)
@@ -225,10 +226,15 @@ def analyze_dialog(
             result["analyzed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             return result
 
-        except (json.JSONDecodeError, KeyError) as exc:
-            backoff = 2 ** attempt + random.uniform(0, 0.5)
+        except Exception as exc:
+            exc_str = str(exc)
+            m = re.search(r"try again in ([\d.]+)s", exc_str, re.IGNORECASE)
+            if m:
+                backoff = float(m.group(1)) + 1.0
+            else:
+                backoff = min(2 ** attempt + random.uniform(0, 0.5), 60.0)
             did = dialog["id"]
-            warn_msg = f"[warn] dialog {did} attempt {attempt + 1} failed: {exc}"
+            warn_msg = f"[warn] dialog {did} attempt {attempt + 1} – {exc_str[:120]}"
             print(
                 f"  {yellow(warn_msg)}  retrying in {backoff:.1f}s",
                 file=sys.stderr,
@@ -599,11 +605,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
+        default=1,
         metavar="N",
         help=(
-            "Parallel LLM calls (default: 4).\n"
-            "Set to 1 to disable concurrency (sequential, easier to debug)."
+            "Parallel LLM calls (default: 1).\n"
+            "Set higher only if your API plan has sufficient rate limits."
         ),
     )
     parser.add_argument(
