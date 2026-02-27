@@ -29,6 +29,7 @@ import argparse
 import json
 import random
 import sys
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -201,7 +202,7 @@ def generate_dialog(
         call_kwargs["seed"] = seed
 
     last_exc: Exception = RuntimeError("unknown")
-    for attempt in range(3):
+    for attempt in range(10):
         try:
             response = client.chat.completions.create(**call_kwargs)
             raw = response.choices[0].message.content.strip()
@@ -215,14 +216,19 @@ def generate_dialog(
             messages = data.get("messages", [])
             return validate_messages(messages)
 
-        except (json.JSONDecodeError, ValueError) as exc:
+        except Exception as exc:
             last_exc = exc
-            backoff = 2 ** attempt + random.uniform(0, 0.5)
-            print(f"  [warn] attempt {attempt + 1} failed: {exc} (retrying in {backoff:.1f}s)", file=sys.stderr)
+            exc_str = str(exc)
+            m = re.search(r"try again in ([\d.]+)s", exc_str, re.IGNORECASE)
+            if m:
+                backoff = float(m.group(1)) + 1.0
+            else:
+                backoff = min(2 ** attempt + random.uniform(0, 0.5), 60.0)
+            print(f"  [warn] attempt {attempt + 1} failed: {exc_str[:120]} (retrying in {backoff:.1f}s)", file=sys.stderr)
             time.sleep(backoff)
 
     raise RuntimeError(
-        f"Failed to generate dialog after 3 attempts ({scenario}/{case_type}): {last_exc}"
+        f"Failed to generate dialog after 10 attempts ({scenario}/{case_type}): {last_exc}"
     )
 
 def _generate_one(args: tuple) -> dict:
@@ -432,11 +438,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=3,
+        default=1,
         metavar="N",
         help=(
-            "Number of parallel LLM generation calls (default: 3).\n"
-            "Set to 1 for sequential generation (easier to debug)."
+            "Number of parallel LLM generation calls (default: 1).\n"
+            "Set higher only if your API plan has sufficient rate limits."
         ),
     )
     return parser.parse_args()
