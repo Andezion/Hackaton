@@ -85,22 +85,19 @@ def serve(port: int, open_browser: bool) -> None:
     t.start()
 
     if open_browser:
-        # short delay so the server is ready before opening the browser
         threading.Timer(0.5, webbrowser.open, args=(url,)).start()
 
     print(green(f"  Dashboard → {bold(url)}"))
     print(dim("  (serving from results/)"))
 
     try:
-        signal.pause()          # block until Ctrl-C
+        signal.pause()          
     except (KeyboardInterrupt, AttributeError):
-        pass                    # AttributeError on Windows (no signal.pause)
+        pass                    
     finally:
         print(dim("\n  Shutting down …"))
         server.shutdown()
 
-
-# ── CLI ────────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -170,8 +167,6 @@ def build_cmd(script: str, args: argparse.Namespace, extra: list[str] | None = N
         cmd += extra
     return cmd
 
-
-# ── main ────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     args = parse_args()
