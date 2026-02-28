@@ -171,9 +171,7 @@ def build_cmd(script: str, args: argparse.Namespace, extra: list[str] | None = N
 def main() -> None:
     args = parse_args()
 
-    print(bold("\n╔══════════════════════════════════════════╗"))
-    print(bold(  "║   Support Chat Quality Analyzer – run   ║"))
-    print(bold(  "╚══════════════════════════════════════════╝"))
+    print(bold("\nSupport Chat Quality Analyzer – run"))
 
     provider_label = args.provider or "auto-detect"
     print(f"\n  Provider : {cyan(provider_label)}")
