@@ -178,7 +178,6 @@ def main() -> None:
     print(f"  Count    : {args.count} dialogs")
     print(f"  Port     : {args.port}")
 
-    # Step 1 – generate
     if not args.skip_generate:
         run_step(
             build_cmd("generate.py", args, ["--count", str(args.count), "--resume"]),
@@ -187,7 +186,6 @@ def main() -> None:
     else:
         print(dim("\n  [skip] generate step"))
 
-    # Step 2 – analyze
     if not args.skip_analyze:
         run_step(
             build_cmd("analyze.py", args, ["--resume"]),
@@ -196,7 +194,6 @@ def main() -> None:
     else:
         print(dim("\n  [skip] analyze step"))
 
-    # Step 3 – build HTML report (no markdown)
     run_step(
         [
             sys.executable, "report.py",
